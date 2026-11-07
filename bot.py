@@ -42,30 +42,38 @@ def clean_html(raw_html):
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
 
-# --- НОВАЯ ФУНКЦИЯ: Поиск картинки в новости ---
+# --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПОИСКА КАРТИНКИ ---
 def extract_image(entry):
-    # 1. Ищем стандартные медиа-вложения (media_content, media_thumbnail)
+    # 1. Пробуем найти в самой RSS-ленте
     if hasattr(entry, 'media_content') and entry.media_content:
         for media in entry.media_content:
-            if media.get('url'):
-                return media.get('url')
-    
+            if media.get('url'): return media.get('url')
     if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
         return entry.media_thumbnail[0].get('url')
-        
-    # 2. Ищем прикрепленные файлы (enclosures)
     if hasattr(entry, 'enclosures') and entry.enclosures:
         for enc in entry.enclosures:
-            if 'image' in enc.get('type', ''):
-                return enc.get('href')
-                
-    # 3. Ищем тег <img> внутри описания (summary)
+            if 'image' in enc.get('type', ''): return enc.get('href')
+    
     raw_summary = getattr(entry, "summary", "")
     if raw_summary:
         img_match = re.search(r'<img[^>]+src="([^">]+)"', raw_summary)
-        if img_match:
-            return img_match.group(1)
+        if img_match: return img_match.group(1)
             
+    # 2. Если в ленте нет — идем на сам сайт новости и ищем там
+    # Обычно картинки лежат в тегах og:image или twitter:image
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        resp = requests.get(entry["link"], headers=headers, timeout=10)
+        if resp.ok:
+            # Ищем og:image (Open Graph картинка)
+            og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
+            if og_match: return og_match.group(1)
+            # Ищем twitter:image (если og:image нет)
+            tw_match = re.search(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
+            if tw_match: return tw_match.group(1)
+    except Exception as e:
+        print(f"Ошибка при поиске картинки на сайте: {e}")
+        
     return None
 
 def load_posted():
@@ -85,7 +93,7 @@ def fetch_entries():
                 raw_summary = getattr(e, "summary", "")
                 summary = clean_html(raw_summary)
                 
-                # Ищем картинку
+                # Ищем картинку (с заходом на сайт)
                 image_url = extract_image(e)
                 
                 if link and title and RUSSIAN_RE.search(title):
@@ -94,7 +102,7 @@ def fetch_entries():
                         "link": link, 
                         "text": f"{title} {summary}".lower(),
                         "summary": summary,
-                        "image_url": image_url # Сохраняем ссылку на картинку
+                        "image_url": image_url
                     })
         except Exception:
             continue
@@ -108,42 +116,37 @@ def post_to_channel(entry):
     summary_text = entry["summary"]
     if len(summary_text) > 800:
         summary_text = summary_text[:800] + "..."
-    
     if not summary_text:
         summary_text = "Подробности в источнике."
 
-    # Формируем подпись (текст под картинкой)
-    # Лимит подписи к фото в Telegram - 1024 символа
     caption = f'<b>{entry["title"]}</b>\n\n{summary_text}'
     
-    # Если картинка найдена, отправляем фото с подписью
+    # Если картинка найдена, отправляем фото
     if entry.get("image_url"):
-        resp = requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-            json={
-                "chat_id": CHANNEL_ID,
-                "photo": entry["image_url"],
-                "caption": caption[:1024], # Обрезаем на всякий случай
-                "parse_mode": "HTML",
-            },
-            timeout=30,
-        )
-        # Если Telegram не смог скачать картинку по ссылке (битая/закрытая), 
-        # отправляем просто текст
-        if not resp.ok:
-            print(f"Не удалось отправить фото ({resp.text}), отправляю текст.")
-            return post_text_fallback(entry, caption)
-        return True, resp.text
-    else:
-        # Если картинки нет, отправляем просто текст
-        return post_text_fallback(entry, caption)
+        try:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                json={
+                    "chat_id": CHANNEL_ID,
+                    "photo": entry["image_url"],
+                    "caption": caption[:1024],
+                    "parse_mode": "HTML",
+                },
+                timeout=30,
+            )
+            if resp.ok:
+                return True, resp.text
+            else:
+                print(f"Фото не отправилось ({resp.text}). Отправляю текст.")
+        except Exception as e:
+            print(f"Ошибка при отправке фото: {e}")
 
-def post_text_fallback(entry, caption):
+    # Страховка: если фото нет или оно не отправилось, шлем текст
     resp = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={
             "chat_id": CHANNEL_ID,
-            "text": caption[:4096], # Лимит текста в Telegram - 4096
+            "text": caption[:4096],
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         },
