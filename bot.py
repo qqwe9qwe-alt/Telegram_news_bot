@@ -1,7 +1,3 @@
-"""
-Бот новостей в Telegram-канал (GitHub Actions, бесплатно, без сервера).
-"""
-
 import os
 import random
 import sys
@@ -9,6 +5,7 @@ import datetime
 import re
 import feedparser
 import requests
+from html import unescape
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]
@@ -19,15 +16,14 @@ POSTED_FILE = "posted.txt"
 ALLOWED_UTC_HOURS = {3, 6, 10, 13, 17}
 
 RSS_FEEDS = [
-    "https://nplus1.ru/rss",                   # N+1 (наука и техника)
-    "https://elementy.ru/rss/news",            # Элементы (научно-популярный)
-    "https://nauka.tass.ru/rss/v2.xml",        # ТАСС Наука
-    "https://www.popmech.ru/rss/all.xml",      # Популярная механика
-    "https://www.techinsider.ru/rss/all.xml",  # TechInsider (курьёзы и техника)
-    "https://science.ru/rss/news"              # Наука.ру
+    "https://nplus1.ru/rss",
+    "https://elementy.ru/rss/news",
+    "https://nauka.tass.ru/rss/v2.xml",
+    "https://www.popmech.ru/rss/all.xml",
+    "https://www.techinsider.ru/rss/all.xml",
+    "https://science.ru/rss/news"
 ]
 
-# Ключевые слова, которые НЕ попадают в канал
 BLOCKED_KEYWORDS = [
     "сво", "спецоперац", "украин", "україн", "зеленск",
     "zelensky", "zelenskyy", "kiev", "kyiv",
@@ -36,8 +32,18 @@ BLOCKED_KEYWORDS = [
     "мариупол", "бахмут", "курск", "белгород",
 ]
 
-# Регулярное выражение для проверки наличия русских букв
 RUSSIAN_RE = re.compile('[а-яА-ЯёЁ]')
+TAGS_RE = re.compile(r'<[^>]+>') # Регулярка для удаления HTML-тегов
+
+def clean_html(raw_html):
+    """Очищает текст от HTML-тегов и лишних пробелов"""
+    if not raw_html:
+        return ""
+    # Убираем HTML-теги и раскодируем спецсимволы (&nbsp;, &quot; и т.д.)
+    clean_text = unescape(TAGS_RE.sub('', raw_html))
+    # Убираем лишние пробелы и переносы строк
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    return clean_text
 
 def load_posted():
     if not os.path.exists(POSTED_FILE):
@@ -47,17 +53,23 @@ def load_posted():
 
 def fetch_entries():
     entries = []
-    for url in RSS_FEEDS: # ИСПРАВЛЕНО: было FEEDS
+    for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
             for e in feed.entries[:15]:
                 link = getattr(e, "link", "")
                 title = getattr(e, "title", "").strip()
-                summary = getattr(e, "summary", "")
+                # Берем summary (краткое описание) и очищаем его
+                raw_summary = getattr(e, "summary", "")
+                summary = clean_html(raw_summary)
                 
-                # Проверяем, что заголовок на русском (содержит русские буквы)
                 if link and title and RUSSIAN_RE.search(title):
-                    entries.append({"title": title, "link": link, "text": f"{title} {summary}".lower()})
+                    entries.append({
+                        "title": title, 
+                        "link": link, 
+                        "text": f"{title} {summary}".lower(),
+                        "summary": summary # Сохраняем очищенный текст
+                    })
         except Exception:
             continue
     return entries
@@ -67,21 +79,31 @@ def is_blocked(entry):
     return any(kw in text for kw in BLOCKED_KEYWORDS)
 
 def post_to_channel(entry):
-    text = f'<b>{entry["title"]}</b>\n\n<a href="{entry["link"]}">Читать полностью</a>'
+    # Форматируем пост: Жирный заголовок + краткий текст
+    # Если текст слишком длинный (больше 800 символов), обрезаем его
+    summary_text = entry["summary"]
+    if len(summary_text) > 800:
+        summary_text = summary_text[:800] + "..."
+    
+    # Если описания нет, ставим заглушку
+    if not summary_text:
+        summary_text = "Подробности в источнике."
+
+    text = f'<b>{entry["title"]}</b>\n\n{summary_text}'
+    
     resp = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={
             "chat_id": CHANNEL_ID,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": True, # Отключаем предпросмотр ссылок (картинки)
         },
         timeout=30,
     )
     return resp.ok, resp.text
 
 def main():
-    # Ручной запуск (workflow_dispatch) — публикуем в любом случае
     if os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
         hour = datetime.datetime.now(datetime.timezone.utc).hour
         if hour not in ALLOWED_UTC_HOURS:
