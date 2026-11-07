@@ -13,24 +13,37 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]
 
 POSTED_FILE = "posted.txt"
 
-# 5 слотов публикации в UTC (06:00, 09:30, 13:00, 16:30, 20:00 по Москве = UTC+3)
 ALLOWED_UTC_HOURS = {3, 6, 10, 13, 17}
 
-# ИСТОЧНИКИ ПО ТЕМЕ СРО
+# ОБНОВЛЕННЫЕ ИСТОЧНИКИ (СРО + аналитика + "инсайды")
 RSS_FEEDS = [
-    "http://tpp-sro.ru/?feed=rss2",            # Новости СРО (пример)
-    "https://newsrus.su/rss/news",             # Служба строительных новостей (раздел СРО)
-    "https://omorrss.ru/rss/news",              # Российский Союз Строителей
-    "https://know-house.ru/novosti/rss.xml",   # Строительные новости (может содержать СРО)
+    # Основные источники по СРО
+    "http://tpp-sro.ru/?feed=rss2",            # Новости СРО (НОСТРОЙ, рейтингование)
+    "https://newsrus.su/rss/news",             # Строительные новости (СРО)
+    "https://omorrss.ru/rss/news",             # Российский Союз Строителей
+    
+    # Аналитика и "околоинсайдерские" разборы
+    "https://stroygaz.ru/rss/",                # Строительная газета (официально, но часто с "инсайдами" реформ)
+    "https://srogazeta.ru/rss/",               # СтройСаморегулирование (разборы 309-ФЗ)
+    "https://pravdaosro.ru/feed/",             # "Правда о СРО" (критика, скандалы, разоблачения)
+    
+    # Строительные новости (для контекста)
+    "https://know-house.ru/novosti/rss.xml",
 ]
 
-# Ключевые слова для фильтрации (чтобы отсечь лишнее и оставить только СРО/строительство)
+# Ключевые слова для фильтрации (оставляем только СРО и строительство)
 BLOCKED_KEYWORDS = [
     "сво", "спецоперац", "украин", "україн", "зеленск",
     "zelensky", "zelenskyy", "kiev", "kyiv",
     "донбасс", "донецк", "луганск", "киев",
     "всу", "кремль", "путин", "харьков", "одесс",
     "мариупол", "бахмут", "курск", "белгород",
+]
+
+# Слова, которые ДОЛЖНЫ быть в новости (чтобы отсечь нерелевантное)
+REQUIRED_KEYWORDS = [
+    "сро", "саморегул", "нострой", "ноприз", "строительн", 
+    "подрядчик", "компенсационн", "реестр", "допуск"
 ]
 
 RUSSIAN_RE = re.compile('[а-яА-ЯёЁ]')
@@ -44,7 +57,6 @@ def clean_html(raw_html):
     return clean_text
 
 def extract_image(entry):
-    # Поиск картинки в RSS-ленте
     if hasattr(entry, 'media_content') and entry.media_content:
         for media in entry.media_content:
             if media.get('url'): return media.get('url')
@@ -59,7 +71,6 @@ def extract_image(entry):
         img_match = re.search(r'<img[^>]+src="([^">]+)"', raw_summary)
         if img_match: return img_match.group(1)
     
-    # Пытаемся найти картинку на сайте новости
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(entry["link"], headers=headers, timeout=10)
@@ -79,40 +90,46 @@ def load_posted():
 def fetch_entries():
     entries = []
     now = time.time()
-    seven_days_ago = now - (7 * 24 * 60 * 60) # 7 дней в секундах
+    seven_days_ago = now - (7 * 24 * 60 * 60)
     
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
-            for e in feed.entries[:15]:
+            for e in feed.entries[:20]: # Берем больше новостей, так как фильтр жесткий
                 link = getattr(e, "link", "")
                 title = getattr(e, "title", "").strip()
                 raw_summary = getattr(e, "summary", "")
                 summary = clean_html(raw_summary)
+                full_text = f"{title} {summary}".lower()
                 
-                # ФИЛЬТР ПО ДАТЕ: новость не старше 7 дней
+                # Фильтр по дате
                 published_parsed = getattr(e, "published_parsed", None)
                 if published_parsed:
-                    # Конвертируем struct_time в timestamp и сравниваем
                     if time.mktime(published_parsed) < seven_days_ago:
-                        continue # Пропускаем старую новость
+                        continue
                 
-                # Проверка на русский язык в заголовке
-                if link and title and RUSSIAN_RE.search(title):
-                    entries.append({
-                        "title": title, 
-                        "link": link, 
-                        "text": f"{title} {summary}".lower(),
-                        "summary": summary,
-                        "image_url": extract_image(e)
-                    })
+                # Проверка на русский язык
+                if not (link and title and RUSSIAN_RE.search(title)):
+                    continue
+                
+                # Проверка на СТОП-слова
+                if any(kw in full_text for kw in BLOCKED_KEYWORDS):
+                    continue
+                
+                # Проверка на ОБЯЗАТЕЛЬНЫЕ слова (должна быть тема СРО)
+                if not any(kw in full_text for kw in REQUIRED_KEYWORDS):
+                    continue
+                
+                entries.append({
+                    "title": title, 
+                    "link": link, 
+                    "text": full_text,
+                    "summary": summary,
+                    "image_url": extract_image(e)
+                })
         except Exception:
             continue
     return entries
-
-def is_blocked(entry):
-    text = entry["text"]
-    return any(kw in text for kw in BLOCKED_KEYWORDS)
 
 def post_to_channel(entry):
     summary_text = entry["summary"]
@@ -121,10 +138,8 @@ def post_to_channel(entry):
     if not summary_text:
         summary_text = "Подробности в источнике."
 
-    # ФОРМИРУЕМ ПОДПИСЬ: Заголовок + Текст + ССЫЛКА
     caption = f'<b>{entry["title"]}</b>\n\n{summary_text}\n\n<a href="{entry["link"]}">Читать полностью</a>'
     
-    # Пытаемся отправить фото
     if entry.get("image_url"):
         try:
             resp = requests.post(
@@ -132,19 +147,16 @@ def post_to_channel(entry):
                 json={
                     "chat_id": CHANNEL_ID,
                     "photo": entry["image_url"],
-                    "caption": caption[:1024], # Лимит подписи к фото
+                    "caption": caption[:1024],
                     "parse_mode": "HTML",
                 },
                 timeout=30,
             )
             if resp.ok:
                 return True, resp.text
-            else:
-                print(f"Не удалось отправить фото ({resp.text}). Пробую текст.")
-        except Exception as e:
-            print(f"Ошибка при отправке фото: {e}")
+        except Exception:
+            pass
 
-    # Страховка: отправляем текст, если фото не ушло
     resp = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={
@@ -165,7 +177,7 @@ def main():
             return
 
     posted = load_posted()
-    entries = [e for e in fetch_entries() if not is_blocked(e)]
+    entries = fetch_entries()
     fresh = [e for e in entries if e["link"] not in posted]
 
     if not fresh:
