@@ -33,17 +33,40 @@ BLOCKED_KEYWORDS = [
 ]
 
 RUSSIAN_RE = re.compile('[а-яА-ЯёЁ]')
-TAGS_RE = re.compile(r'<[^>]+>') # Регулярка для удаления HTML-тегов
+TAGS_RE = re.compile(r'<[^>]+>')
 
 def clean_html(raw_html):
-    """Очищает текст от HTML-тегов и лишних пробелов"""
     if not raw_html:
         return ""
-    # Убираем HTML-теги и раскодируем спецсимволы (&nbsp;, &quot; и т.д.)
     clean_text = unescape(TAGS_RE.sub('', raw_html))
-    # Убираем лишние пробелы и переносы строк
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
+
+# --- НОВАЯ ФУНКЦИЯ: Поиск картинки в новости ---
+def extract_image(entry):
+    # 1. Ищем стандартные медиа-вложения (media_content, media_thumbnail)
+    if hasattr(entry, 'media_content') and entry.media_content:
+        for media in entry.media_content:
+            if media.get('url'):
+                return media.get('url')
+    
+    if hasattr(entry, 'media_thumbnail') and entry.media_thumbnail:
+        return entry.media_thumbnail[0].get('url')
+        
+    # 2. Ищем прикрепленные файлы (enclosures)
+    if hasattr(entry, 'enclosures') and entry.enclosures:
+        for enc in entry.enclosures:
+            if 'image' in enc.get('type', ''):
+                return enc.get('href')
+                
+    # 3. Ищем тег <img> внутри описания (summary)
+    raw_summary = getattr(entry, "summary", "")
+    if raw_summary:
+        img_match = re.search(r'<img[^>]+src="([^">]+)"', raw_summary)
+        if img_match:
+            return img_match.group(1)
+            
+    return None
 
 def load_posted():
     if not os.path.exists(POSTED_FILE):
@@ -59,16 +82,19 @@ def fetch_entries():
             for e in feed.entries[:15]:
                 link = getattr(e, "link", "")
                 title = getattr(e, "title", "").strip()
-                # Берем summary (краткое описание) и очищаем его
                 raw_summary = getattr(e, "summary", "")
                 summary = clean_html(raw_summary)
+                
+                # Ищем картинку
+                image_url = extract_image(e)
                 
                 if link and title and RUSSIAN_RE.search(title):
                     entries.append({
                         "title": title, 
                         "link": link, 
                         "text": f"{title} {summary}".lower(),
-                        "summary": summary # Сохраняем очищенный текст
+                        "summary": summary,
+                        "image_url": image_url # Сохраняем ссылку на картинку
                     })
         except Exception:
             continue
@@ -79,25 +105,47 @@ def is_blocked(entry):
     return any(kw in text for kw in BLOCKED_KEYWORDS)
 
 def post_to_channel(entry):
-    # Форматируем пост: Жирный заголовок + краткий текст
-    # Если текст слишком длинный (больше 800 символов), обрезаем его
     summary_text = entry["summary"]
     if len(summary_text) > 800:
         summary_text = summary_text[:800] + "..."
     
-    # Если описания нет, ставим заглушку
     if not summary_text:
         summary_text = "Подробности в источнике."
 
-    text = f'<b>{entry["title"]}</b>\n\n{summary_text}'
+    # Формируем подпись (текст под картинкой)
+    # Лимит подписи к фото в Telegram - 1024 символа
+    caption = f'<b>{entry["title"]}</b>\n\n{summary_text}'
     
+    # Если картинка найдена, отправляем фото с подписью
+    if entry.get("image_url"):
+        resp = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            json={
+                "chat_id": CHANNEL_ID,
+                "photo": entry["image_url"],
+                "caption": caption[:1024], # Обрезаем на всякий случай
+                "parse_mode": "HTML",
+            },
+            timeout=30,
+        )
+        # Если Telegram не смог скачать картинку по ссылке (битая/закрытая), 
+        # отправляем просто текст
+        if not resp.ok:
+            print(f"Не удалось отправить фото ({resp.text}), отправляю текст.")
+            return post_text_fallback(entry, caption)
+        return True, resp.text
+    else:
+        # Если картинки нет, отправляем просто текст
+        return post_text_fallback(entry, caption)
+
+def post_text_fallback(entry, caption):
     resp = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={
             "chat_id": CHANNEL_ID,
-            "text": text,
+            "text": caption[:4096], # Лимит текста в Telegram - 4096
             "parse_mode": "HTML",
-            "disable_web_page_preview": True, # Отключаем предпросмотр ссылок (картинки)
+            "disable_web_page_preview": True,
         },
         timeout=30,
     )
