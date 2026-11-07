@@ -3,6 +3,7 @@ import random
 import sys
 import datetime
 import re
+import time
 import feedparser
 import requests
 from html import unescape
@@ -15,15 +16,15 @@ POSTED_FILE = "posted.txt"
 # 5 слотов публикации в UTC (06:00, 09:30, 13:00, 16:30, 20:00 по Москве = UTC+3)
 ALLOWED_UTC_HOURS = {3, 6, 10, 13, 17}
 
+# ИСТОЧНИКИ ПО ТЕМЕ СРО
 RSS_FEEDS = [
-    "https://nplus1.ru/rss",
-    "https://elementy.ru/rss/news",
-    "https://nauka.tass.ru/rss/v2.xml",
-    "https://www.popmech.ru/rss/all.xml",
-    "https://www.techinsider.ru/rss/all.xml",
-    "https://science.ru/rss/news"
+    "http://tpp-sro.ru/?feed=rss2",            # Новости СРО (пример)
+    "https://newsrus.su/rss/news",             # Служба строительных новостей (раздел СРО)
+    "https://omorrss.ru/rss/news",              # Российский Союз Строителей
+    "https://know-house.ru/novosti/rss.xml",   # Строительные новости (может содержать СРО)
 ]
 
+# Ключевые слова для фильтрации (чтобы отсечь лишнее и оставить только СРО/строительство)
 BLOCKED_KEYWORDS = [
     "сво", "спецоперац", "украин", "україн", "зеленск",
     "zelensky", "zelenskyy", "kiev", "kyiv",
@@ -42,9 +43,8 @@ def clean_html(raw_html):
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     return clean_text
 
-# --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПОИСКА КАРТИНКИ ---
 def extract_image(entry):
-    # 1. Пробуем найти в самой RSS-ленте
+    # Поиск картинки в RSS-ленте
     if hasattr(entry, 'media_content') and entry.media_content:
         for media in entry.media_content:
             if media.get('url'): return media.get('url')
@@ -58,22 +58,16 @@ def extract_image(entry):
     if raw_summary:
         img_match = re.search(r'<img[^>]+src="([^">]+)"', raw_summary)
         if img_match: return img_match.group(1)
-            
-    # 2. Если в ленте нет — идем на сам сайт новости и ищем там
-    # Обычно картинки лежат в тегах og:image или twitter:image
+    
+    # Пытаемся найти картинку на сайте новости
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(entry["link"], headers=headers, timeout=10)
         if resp.ok:
-            # Ищем og:image (Open Graph картинка)
             og_match = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
             if og_match: return og_match.group(1)
-            # Ищем twitter:image (если og:image нет)
-            tw_match = re.search(r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']', resp.text)
-            if tw_match: return tw_match.group(1)
-    except Exception as e:
-        print(f"Ошибка при поиске картинки на сайте: {e}")
-        
+    except Exception:
+        pass
     return None
 
 def load_posted():
@@ -84,6 +78,9 @@ def load_posted():
 
 def fetch_entries():
     entries = []
+    now = time.time()
+    seven_days_ago = now - (7 * 24 * 60 * 60) # 7 дней в секундах
+    
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
@@ -93,16 +90,21 @@ def fetch_entries():
                 raw_summary = getattr(e, "summary", "")
                 summary = clean_html(raw_summary)
                 
-                # Ищем картинку (с заходом на сайт)
-                image_url = extract_image(e)
+                # ФИЛЬТР ПО ДАТЕ: новость не старше 7 дней
+                published_parsed = getattr(e, "published_parsed", None)
+                if published_parsed:
+                    # Конвертируем struct_time в timestamp и сравниваем
+                    if time.mktime(published_parsed) < seven_days_ago:
+                        continue # Пропускаем старую новость
                 
+                # Проверка на русский язык в заголовке
                 if link and title and RUSSIAN_RE.search(title):
                     entries.append({
                         "title": title, 
                         "link": link, 
                         "text": f"{title} {summary}".lower(),
                         "summary": summary,
-                        "image_url": image_url
+                        "image_url": extract_image(e)
                     })
         except Exception:
             continue
@@ -114,14 +116,15 @@ def is_blocked(entry):
 
 def post_to_channel(entry):
     summary_text = entry["summary"]
-    if len(summary_text) > 800:
-        summary_text = summary_text[:800] + "..."
+    if len(summary_text) > 500:
+        summary_text = summary_text[:500] + "..."
     if not summary_text:
         summary_text = "Подробности в источнике."
 
-    caption = f'<b>{entry["title"]}</b>\n\n{summary_text}'
+    # ФОРМИРУЕМ ПОДПИСЬ: Заголовок + Текст + ССЫЛКА
+    caption = f'<b>{entry["title"]}</b>\n\n{summary_text}\n\n<a href="{entry["link"]}">Читать полностью</a>'
     
-    # Если картинка найдена, отправляем фото
+    # Пытаемся отправить фото
     if entry.get("image_url"):
         try:
             resp = requests.post(
@@ -129,7 +132,7 @@ def post_to_channel(entry):
                 json={
                     "chat_id": CHANNEL_ID,
                     "photo": entry["image_url"],
-                    "caption": caption[:1024],
+                    "caption": caption[:1024], # Лимит подписи к фото
                     "parse_mode": "HTML",
                 },
                 timeout=30,
@@ -137,11 +140,11 @@ def post_to_channel(entry):
             if resp.ok:
                 return True, resp.text
             else:
-                print(f"Фото не отправилось ({resp.text}). Отправляю текст.")
+                print(f"Не удалось отправить фото ({resp.text}). Пробую текст.")
         except Exception as e:
             print(f"Ошибка при отправке фото: {e}")
 
-    # Страховка: если фото нет или оно не отправилось, шлем текст
+    # Страховка: отправляем текст, если фото не ушло
     resp = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         json={
@@ -166,7 +169,7 @@ def main():
     fresh = [e for e in entries if e["link"] not in posted]
 
     if not fresh:
-        print("Нет свежих новостей — выход.")
+        print("Нет свежих новостей о СРО за последнюю неделю — выход.")
         return
 
     entry = random.choice(fresh)
