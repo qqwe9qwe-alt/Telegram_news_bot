@@ -26,12 +26,13 @@ POSTED_FILE = "posted.txt"
 # 5 слотов публикации в UTC (06:00, 09:30, 13:00, 16:30, 20:00 по Москве = UTC+3)
 ALLOWED_UTC_HOURS = {3, 6, 10, 13, 17}
 
-FEEDS = [
-    "https://nplus1.ru/rss",                          # N+1 (наука)
-    "https://www.sciencedaily.com/rss/top/science.xml",  # ScienceDaily
-    "https://phys.org/rss-feed/",                     # Phys.org
-    "https://www.popularmechanics.com/rss/all.xml",   # Popular Mechanics
-    "https://elementy.ru/rss/news",                   # Элементы большой науки
+RSS_FEEDS = [
+    "https://nplus1.ru/rss",                   # N+1 (наука и техника)
+    "https://elementy.ru/rss/news",            # Элементы (научно-популярный)
+    "https://nauka.tass.ru/rss/v2.xml",        # ТАСС Наука
+    "https://www.popmech.ru/rss/all.xml",      # Популярная механика
+    "https://www.techinsider.ru/rss/all.xml",  # TechInsider (курьёзы и техника)
+    "https://science.ru/rss/news"              # Наука.ру
 ]
 
 # Ключевые слова, которые НЕ попадают в канал (тема СВО/Украины)
