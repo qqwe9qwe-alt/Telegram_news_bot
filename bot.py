@@ -1,20 +1,12 @@
 """
 Бот новостей в Telegram-канал (GitHub Actions, бесплатно, без сервера).
-
-Публикация: 5 раз в день (06:00, 09:30, 13:00, 16:30, 20:00 по Москве).
-Источники: RSS-ленты научных СМИ.
-Фильтр: вырезает новости про СВО/Украину (тема Ирана — допустима).
-Антидубли: posted.txt хранится в репозитории и коммитится после каждого поста.
-
-Переменные окружения:
-  BOT_TOKEN   — токен от @BotFather
-  CHANNEL_ID  — @имя_канала или id (например, -1001234567890)
 """
 
 import os
 import random
 import sys
 import datetime
+import re
 import feedparser
 import requests
 
@@ -35,7 +27,7 @@ RSS_FEEDS = [
     "https://science.ru/rss/news"              # Наука.ру
 ]
 
-# Ключевые слова, которые НЕ попадают в канал (тема СВО/Украины)
+# Ключевые слова, которые НЕ попадают в канал
 BLOCKED_KEYWORDS = [
     "сво", "спецоперац", "украин", "україн", "зеленск",
     "zelensky", "zelenskyy", "kiev", "kyiv",
@@ -44,6 +36,8 @@ BLOCKED_KEYWORDS = [
     "мариупол", "бахмут", "курск", "белгород",
 ]
 
+# Регулярное выражение для проверки наличия русских букв
+RUSSIAN_RE = re.compile('[а-яА-ЯёЁ]')
 
 def load_posted():
     if not os.path.exists(POSTED_FILE):
@@ -51,27 +45,26 @@ def load_posted():
     with open(POSTED_FILE, encoding="utf-8") as f:
         return {line.strip() for line in f if line.strip()}
 
-
 def fetch_entries():
     entries = []
-    for url in FEEDS:
+    for url in RSS_FEEDS: # ИСПРАВЛЕНО: было FEEDS
         try:
             feed = feedparser.parse(url)
             for e in feed.entries[:15]:
                 link = getattr(e, "link", "")
                 title = getattr(e, "title", "").strip()
                 summary = getattr(e, "summary", "")
-                if link and title:
+                
+                # Проверяем, что заголовок на русском (содержит русские буквы)
+                if link and title and RUSSIAN_RE.search(title):
                     entries.append({"title": title, "link": link, "text": f"{title} {summary}".lower()})
         except Exception:
-            continue  # битая лента пропускается
+            continue
     return entries
-
 
 def is_blocked(entry):
     text = entry["text"]
     return any(kw in text for kw in BLOCKED_KEYWORDS)
-
 
 def post_to_channel(entry):
     text = f'<b>{entry["title"]}</b>\n\n<a href="{entry["link"]}">Читать полностью</a>'
@@ -86,7 +79,6 @@ def post_to_channel(entry):
         timeout=30,
     )
     return resp.ok, resp.text
-
 
 def main():
     # Ручной запуск (workflow_dispatch) — публикуем в любом случае
@@ -114,7 +106,6 @@ def main():
     with open(POSTED_FILE, "a", encoding="utf-8") as f:
         f.write(entry["link"] + "\n")
     print(f"Опубликовано: {entry['title']}")
-
 
 if __name__ == "__main__":
     main()
