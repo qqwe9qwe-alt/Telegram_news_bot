@@ -1,1 +1,40 @@
+name: post-news
+
+on:
+  schedule:
+    - cron: "0 3 * * *"    # 06:00 МСК
+    - cron: "30 6 * * *"   # 09:30 МСК
+    - cron: "0 10 * * *"   # 13:00 МСК
+    - cron: "30 13 * * *"  # 16:30 МСК
+    - cron: "0 17 * * *"   # 20:00 МСК
+  workflow_dispatch:       # ручной запуск для теста
+
+permissions:
+  contents: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Post to channel
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python bot.py
+
+      - name: Save posted history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add posted.txt
+          git commit -m "update posted history" || exit 0
+          git push
 
